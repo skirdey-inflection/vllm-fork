@@ -893,7 +893,8 @@ class AsyncLLMEngine:
                 engine.engine.parallel_config.pipeline_parallel_size
         has_requests_in_progress = [False] * pipeline_parallel_size
         
-
+        WARMUP_STEP = 0 
+        ACTIVE_STEP = 1
         hb_profer = HabanaProfile(
             warmup=WARMUP_STEP, active=ACTIVE_STEP, record_shapes=False
         )
