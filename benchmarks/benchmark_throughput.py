@@ -123,6 +123,8 @@ def run_vllm(
         use_padding_aware_scheduling=use_padding_aware_scheduling,
         max_num_seqs=max_num_seqs,
         max_num_prefill_seqs=max_num_prefill_seqs,
+        block_size=128,
+        num_lookahead_slots=1 
     )
 
     # Add the requests to the engine.
