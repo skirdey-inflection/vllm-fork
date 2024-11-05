@@ -964,13 +964,15 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> PrepareDecodeMetadata:
-        input_tokens: List[List[int]] = []
-        input_positions: List[List[int]] = []
-        slot_mapping: List[List[int]] = []
+        input_tokens: List[int] = []
+        input_positions: List[int] = []
+        slot_mapping: List[int] = []
         seq_lens: List[int] = []
+        context_lens: List[int] = []
+        query_lens: List[int] = []
         block_tables: List[List[int]] = []
-        lora_index_mapping: List[List[int]] = []
-        lora_prompt_mapping: List[List[int]] = []
+        lora_index_mapping: List[int] = []
+        lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
 
         if len(seq_group_metadata_list) == 0:
@@ -994,15 +996,20 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
-                input_tokens.append([generation_token])
+                input_tokens.append(generation_token)
 
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
-                input_positions.append([position])
+                input_positions.append(position)
 
                 seq_len = seq_len if self.sliding_window is None else min(
                     seq_len, self.sliding_window)
                 seq_lens.append(seq_len)
+                
+                context_len = seq_data.get_num_computed_tokens()
+                context_lens.append(context_len)
+                query_len = seq_len - context_len
+                query_lens.append(query_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
                 if len(block_table) == 0:
@@ -1014,7 +1021,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 else:
                     block_offset = position % self.block_size
                     slot = block_number * self.block_size + block_offset
-                slot_mapping.append([slot])
+                slot_mapping.append(slot)
                 lora_index_mapping.append(lora_id)
                 lora_prompt_mapping.append(lora_id)
 
@@ -1024,6 +1031,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
+        batch_size = len(input_tokens)
+        max_context_len = max(context_lens)
+
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
                                     device=self.device)
@@ -1031,7 +1041,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                        dtype=torch.long,
                                        device=self.device)
 
-        num_decode_tokens = sum(seq_lens)
+        num_decode_tokens = sum(query_lens)
 
         blocks_used = [len(bt) for bt in block_tables if bt]
         block_list = []
@@ -1050,7 +1060,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             itertools.chain.from_iterable(block_mapping_nested))
 
         last_block = [
-            sl % self.block_size + 1 for sl in itertools.chain(*slot_mapping)
+            sl % self.block_size + 1 for sl in itertools.chain(slot_mapping)
         ]
         block_usage = [[self.block_size] * (b_u - 1) + [lb]
                        for b_u, lb in zip(blocks_used, last_block)]
@@ -1072,16 +1082,52 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         block_usage = torch.tensor(block_usage,
                                    dtype=self.model_config.dtype,
                                    device=self.device)
-
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)
+        context_lens = torch.tensor(context_lens,
+                                    dtype=torch.int,
+                                    device=self.device)
+        
+        query_lens_tensor = torch.tensor(query_lens,
+                                         dtype=torch.int32,
+                                         device=self.device)
+        query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
+                                      dtype=torch.int32,
+                                      device=self.device)
+        torch.cumsum(query_lens_tensor,
+                     dim=0,
+                     dtype=query_start_loc.dtype,
+                     out=query_start_loc[1:])
+        
+        seq_lens_tensor = torch.tensor(seq_lens, 
+                                         dtype=torch.int,
+                                         device=self.device)
+        
+        seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
+                                    dtype=torch.int32,
+                                    device=self.device)
+        torch.cumsum(seq_lens_tensor,
+                     dim=0,
+                     dtype=seq_start_loc.dtype,
+                     out=seq_start_loc[1:])
+
+
 
         block_indices, block_offsets = precompute_indices_and_offsets(
             self.block_size, slot_mapping, False)
         block_scales = torch.tensor(block_scales,
                                     dtype=self.model_config.dtype,
                                     device=self.device)
+        max_block_table_len = max(
+            len(block_table) for block_table in block_tables)
+        block_tables = make_tensor_with_pad(
+            block_tables,
+            max_len=max_block_table_len,
+            pad=0,
+            dtype=torch.int,
+            device=self.device,
+        )
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
@@ -1092,11 +1138,18 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_offsets=block_offsets,
             block_scales=block_scales,
             attn_bias=None,
-            seq_lens_tensor=None,
+            seq_lens_tensor=seq_lens_tensor,
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
+            seq_lens = seq_lens,
+            max_prefill_seq_len = 0,
+            max_decode_seq_len = max(seq_lens),
+            query_start_loc = query_start_loc,
+            seq_start_loc = seq_start_loc,
+            context_lens_tensor = context_lens,
+            block_tables=block_tables,
         )
         return PrepareDecodeMetadata(input_tokens=input_tokens,
                                      input_positions=input_positions,
@@ -1106,6 +1159,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                      lora_requests=lora_requests,
                                      slot_mapping=slot_mapping,
                                      lora_ids=lora_ids)
+
+
+    def get_max_block_per_batch(self) -> int:
+        block_size = self.block_size
+        return (self.model_config.max_seq_len_to_capture + block_size - 1) // block_size
 
     def _prepare_model_input_tensors(
         self,

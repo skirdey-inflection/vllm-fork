@@ -254,6 +254,113 @@ def test_prepare_decode_cuda_graph(batch_size):
                             dtype=actual.dtype)
     torch.testing.assert_close(actual, expected)
 
+@pytest.mark.parametrize("batch_size", list(range(1, 257)))
+def test_prepare_decode(batch_size):
+    model_runner = _create_model_runner(
+        "facebook/opt-125m",
+        seed=0,
+        dtype="float16",
+        enforce_eager=True,
+        max_num_batched_tokens=100000,
+        max_num_seqs=100000,
+        enable_chunked_prefill=False,
+    )
+
+    context_lens: List[int] = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    # Assume each seq group finishes prefill.
+    for i in range(batch_size):
+        # make sure all tokens fit into one block
+        context_len = i % (model_runner.block_size - 1) + 1
+        context_lens.append(context_len)
+        seq_data = SequenceData.from_seqs(range(context_len))
+        seq_data.update_num_computed_tokens(context_len)
+        # Append one token ID since prefill is finished.
+        seq_data.append_token_id(1, 0)
+        seq_group_metadata = SequenceGroupMetadata(
+            request_id=f"test_{i}",
+            is_prompt=False,
+            seq_data={0: seq_data},
+            sampling_params=SamplingParams(temperature=0),
+            block_tables={0: [1]},
+        )
+        assert seq_group_metadata.token_chunk_size == 1
+        seq_group_metadata_list.append(seq_group_metadata)
+
+    model_input = model_runner._prepare_model_input_tensors(
+        seq_group_metadata_list)
+    input_tokens, input_positions, attn_metadata, slot_mapping = (
+        model_input[0].input_tokens, model_input[0].input_positions,
+        model_input[0].attn_metadata, model_input[0].attn_metadata.slot_mapping)
+    assert len(slot_mapping) == len(input_tokens)
+
+    # expected_bs = _get_graph_batch_size(len(seq_group_metadata_list))
+    # Verify input metadata is correct for prompts.
+    device = model_runner.device
+    assert attn_metadata.num_prefills == 0
+    assert attn_metadata.num_prefill_tokens == 0
+    seq_lens = [context_len + 1 for context_len in context_lens]
+    # seq_lens are padded to expected_bs
+    '''for _ in range(expected_bs - len(seq_lens)):
+        seq_lens.append(1)'''
+    assert attn_metadata.seq_lens == seq_lens
+    assert attn_metadata.num_decode_tokens == len(seq_lens)
+    start_idx = 0
+    start_loc = [start_idx]
+    for _ in context_lens:
+        # decode has only 1 token for query.
+        start_idx += 1
+        start_loc.append(start_idx)
+    torch.testing.assert_close(
+        attn_metadata.query_start_loc.to('cpu'),
+        torch.tensor(start_loc, dtype=torch.int32, device='cpu'))
+
+    start_idx = 0
+    seq_start_loc = [start_idx]
+    for seq_len in seq_lens:
+        start_idx += seq_len
+        seq_start_loc.append(start_idx)
+    torch.testing.assert_close(
+        attn_metadata.seq_start_loc.to('cpu'),
+        torch.tensor(seq_start_loc, dtype=torch.int32, device='cpu'))
+
+    torch.testing.assert_close(
+        attn_metadata.context_lens_tensor.to('cpu'),
+        torch.tensor(context_lens, dtype=torch.int, device='cpu'))
+    assert attn_metadata.max_decode_seq_len == max(seq_lens)
+    torch.testing.assert_close(
+        attn_metadata.seq_lens_tensor[:len(seq_lens)],
+        torch.tensor(seq_lens, dtype=torch.int, device=device))
+
+    # block table's first index corresponds to each batch, meaning in
+    # decoding it is each token.
+    assert attn_metadata.block_tables.shape[0] == len(input_tokens)
+    # Block table's second dim correspondsd to each token's block number.
+    # It is padded up to
+    '''assert attn_metadata.block_tables.shape[1] == (
+        model_runner.get_max_block_per_batch())'''
+
+    '''assert len(input_tokens) == expected_bs
+    assert len(input_positions) == expected_bs'''
+    torch.allclose(input_tokens.to('cpu'), input_positions.to('cpu'))
+
+    # Verify Sampling
+    expected_selected_token_indices = []
+    for selected_token_start_idx, _ in enumerate(context_lens):
+        expected_selected_token_indices.append(selected_token_start_idx)
+    sampling_metadata = SamplingMetadata.prepare(
+        seq_group_metadata_list,
+        seq_lens,
+        # query lens is all 1 for decode.
+        query_lens=[1 for _ in range(len(context_lens))],
+        device=model_runner.device,
+        pin_memory=model_runner.pin_memory)
+    actual = sampling_metadata.selected_token_indices
+    expected = torch.tensor(expected_selected_token_indices,
+                            device=actual.device,
+                            dtype=actual.dtype)
+    torch.testing.assert_close(actual.to('cpu'), expected.to('cpu'))
+
 
 def test_empty_seq_group():
     """Verify prepare prompt and decode returns empty output."""
