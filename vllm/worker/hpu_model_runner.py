@@ -241,8 +241,9 @@ def align_workers(value, op):
     return value_t.item()
 
 
-def setup_profiler():
-    schedule = torch.profiler.schedule(wait=0, warmup=2, active=1, repeat=1)
+def setup_profiler(warmup=2, steps=1):
+    print(f'profiler active: {steps}')
+    schedule = torch.profiler.schedule(wait=0, warmup=warmup, active=steps, repeat=1)
     DEVICE = 'hpu'
     activities = [torch.profiler.ProfilerActivity.CPU]
     activities.extend([torch.profiler.ProfilerActivity.HPU] if DEVICE ==
@@ -1454,7 +1455,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         is_prompt,
                         kv_caches,
                         is_pt_profiler_run=False,
-                        is_lora_profile_run=False) -> None:
+                        is_lora_profile_run=False,
+                        pt_profiler_steps=1) -> None:
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
         scenario_name = ("warmup_"
                          f"{'prompt' if is_prompt else 'decode'}_"
@@ -1485,7 +1487,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     for idx in range(batch_size)
                 ]
         self.profiler.start('internal', scenario_name)
-        times = 3 if use_graphs or is_pt_profiler_run else 1
+        times = 3 if use_graphs else 1
+        warmup_steps = 2 * self.scheduler_config.num_scheduler_steps
+        times = warmup_steps + pt_profiler_steps if is_pt_profiler_run else times
         if is_prompt:
             seqs = [
                 self.create_dummy_seq_group_metadata(
@@ -1509,18 +1513,37 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     if dummy_lora_requests_per_seq else None)
                 for i, b in enumerate(blocks)
             ]
+        if self.scheduler_config.is_multi_step and is_pt_profiler_run:
+            for seq_group in seqs:
+                seq_group.state.num_steps = self.scheduler_config.num_scheduler_steps
+                seq_group.state.current_step = 0
+        logger.info(f'is_prompt: {is_prompt}')
         torch.hpu.synchronize()
         profiler = None
         if is_pt_profiler_run and self.is_driver_worker:
-            profiler = setup_profiler()
+            print(f'pt_profiler_steps: {pt_profiler_steps}')
+            profiler = setup_profiler(warmup_steps, pt_profiler_steps)
             profiler.start()
+        multi_step_kwargs = {}                    
         for _ in range(times):
             inputs = self.prepare_model_input(seqs)
-            self.execute_model(inputs, kv_caches, warmup_mode=True)
-            torch.hpu.synchronize()
+            if self.scheduler_config.is_multi_step and is_pt_profiler_run:
+                inputs = dataclasses.replace(inputs, is_first_multi_step = seqs[0].state.current_step == 0,
+                                                    is_last_step = seqs[0].state.remaining_steps == 1)
+                logger.info(f"inputs.is_first_multi_step: {inputs.is_first_multi_step}, inputs.is_last_step: {inputs.is_last_step}" )
+                multi_step_kwargs['num_steps'] = self.scheduler_config.num_scheduler_steps 
+            self.execute_model(inputs, kv_caches, warmup_mode=True, **multi_step_kwargs)
+            if self.scheduler_config.is_multi_step and is_pt_profiler_run:
+                for seq_group in seqs:
+                    seq_group.finish_step()
+                    if seq_group.state.remaining_steps == 0:
+                        seq_group.state.current_step = 0
+            else:
+                torch.hpu.synchronize()
             if profiler:
                 profiler.step()
         if profiler:
+            torch.hpu.synchronize()
             profiler.stop()
         self.profiler.end()
         gc.collect()
@@ -1637,11 +1660,15 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         if profile := os.environ.get('VLLM_PT_PROFILE', None):
             phase, bs, seq_len, graph = profile.split('_')
             is_prompt = phase == 'prompt'
+            logger.error(f'warmup_model phase: {phase}')
+            logger.error(f'warmup_model is_prompt: {is_prompt}')
             graphs = graph == 't'
             if graphs:
                 self.graphed_buckets.add((int(bs), int(seq_len), is_prompt))
+            steps = int(os.environ.get('VLLM_PT_PROFILE_STEPS', 1))
+            print(f'num_profiler_steps: {steps}')
             self.warmup_scenario(int(bs), int(seq_len), is_prompt, kv_caches,
-                                 True)
+                                 True, pt_profiler_steps=steps)
             raise AssertionError("Finished profiling")
         if self.skip_warmup:
             logger.info("Skipping warmup...")
@@ -2154,27 +2181,24 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         self.cached_step_outputs.append(output)
                 htorch.core.mark_step()
                 if i < num_steps - 1:
-                    if i == 0:
-                        import copy
-                        ctx = model_input.async_callback.keywords[  # type: ignore
-                            "ctx"]
-                        seq_group_metadata_list = ctx.seq_group_metadata_list
-                        seq_group_metadata_list = copy.deepcopy(
-                            seq_group_metadata_list)
-                    for seq_group_metadata in seq_group_metadata_list:
-                        for data in seq_group_metadata.seq_data.values():
-                            max_output_len = sampling_metadata.seq_groups[
-                                0].sampling_params.max_tokens
-                            if len(data.output_token_ids) < max_output_len - 1:
-                                # arbitrary value, this could be any token
-                                dummy_token = (540, )
-                                data.output_token_ids += (dummy_token)
-                            else:
-                                if num_steps == 1:
-                                    return [output]
-                                else:
-                                    return []
+                    # Prepare the inputs for the next step.
+                    token_ids = output_token_ids.unsqueeze(dim=1).int()
+                    position_ids = position_ids + 1
+                    attn_metadata.context_lens = attn_metadata.context_lens + 1
 
+                    block_tables = attn_metadata.block_tables
+                    block_number = block_tables.gather(
+                        1,
+                        position_ids.long() // self.block_size)
+                    block_offset = position_ids % self.block_size
+
+                    is_padding = slot_mapping == _PAD_SLOT_ID
+                    slot_mapping = block_number * self.block_size + block_offset
+                    slot_mapping = slot_mapping.long()
+                    slot_mapping = torch.where(is_padding, _PAD_SLOT_ID,
+                                               slot_mapping)
+                    attn_metadata.slot_mapping = slot_mapping
+    
                     result = self._prepare_decode(seq_group_metadata_list,
                                                   output=output)
                     execute_model_kwargs.update({
