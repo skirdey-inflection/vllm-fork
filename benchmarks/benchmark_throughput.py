@@ -233,7 +233,6 @@ async def run_vllm_async(
         use_padding_aware_scheduling=use_padding_aware_scheduling,
         max_num_prefill_seqs=max_num_prefill_seqs,
     )
-
     async with build_async_engine_client_from_engine_args(
             engine_args, disable_frontend_multiprocessing) as llm:
 
@@ -257,9 +256,14 @@ async def run_vllm_async(
             generator = llm.generate(prompt, sp, request_id=f"test{i}")
             generators.append(generator)
         all_gens = merge_async_iterators(*generators)
-        async for i, res in all_gens:
-            pass
         end = time.perf_counter()
+        async for i, res in all_gens:
+            if res.finished:
+                print('=================================================')
+                print(f'TEST ACC: request id = {res.request_id}\n')
+                print(f'TEST ACC: prompt = {res.prompt}\n')
+                print(f'TEST ACC: response = {res.outputs[0].text}')
+                print('=================================================\n\n')
         return end - start
 
 
@@ -372,7 +376,8 @@ def main(args: argparse.Namespace):
         ]
 
         if args.async_engine:
-            run_args.append(args.disable_frontend_multiprocessing)
+            # run_args order has to be preserved. hence adding it to the specific index
+            run_args.insert(24, args.disable_frontend_multiprocessing)
             elapsed_time = uvloop.run(run_vllm_async(*run_args))
         else:
             elapsed_time = run_vllm(*run_args)
