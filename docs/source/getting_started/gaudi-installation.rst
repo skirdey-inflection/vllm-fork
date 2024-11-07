@@ -377,7 +377,8 @@ Environment variables
          - sequence length min (``VLLM_DECODE_BLOCK_BUCKET_MIN``): ``block_size``
          - sequence length step (``VLLM_DECODE_BLOCK_BUCKET_STEP``): ``block_size``
          - sequence length max (``VLLM_DECODE_BLOCK_BUCKET_MAX``): ``max(128, (max_num_seqs*max_model_len)/block_size)``
-
+-   ``VLLM_CONFIG_HIDDEN_LAYERS``: configure how many hidden layers to run in a HPUGraph for model splitting among hidden layers when TP is 1.
+The default is 1. It helps with througput improvement under inter-token latency limitation for some models.
 
 Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM execution:  
 
