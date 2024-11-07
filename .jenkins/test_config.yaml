@@ -31,13 +31,13 @@ stages:
     steps:
       - name: gsm8k_small_g3_tp1_mss
         flavor: g3
-        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 1
+        command: VLLM_CONTIGUOUS_PA=true VLLM_PA_SOFTMAX_IMPL='wsum' cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 1
       - name: gsm8k_small_g2_tp1_mss
         flavor: g2
-        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 1
+        command: VLLM_CONTIGUOUS_PA=true VLLM_PA_SOFTMAX_IMPL='wsum' cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 1
       - name: gsm8k_small_g3_tp2_mss
         flavor: g3.s
-        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 2
+        command: VLLM_CONTIGUOUS_PA=true VLLM_PA_SOFTMAX_IMPL='wsum' cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 2
       - name: gsm8k_small_g2_tp2_mss
         flavor: g2.s
-        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 2
+        command: VLLM_CONTIGUOUS_PA=true VLLM_PA_SOFTMAX_IMPL='wsum' cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 2
