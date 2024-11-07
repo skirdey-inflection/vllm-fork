@@ -264,17 +264,14 @@ def get_hpu_info():
         model_re = re.compile(r'Product Name.+?: (.+)')
         count_re = re.compile(r'Attached AIPs.+?: (\d+)')
         driver_re = re.compile(r'Driver Version.+?: (.+)')
-        for line in lines:
-            hpu_c = count_re.match(line)
-            if hpu_c:
+        for line in lines:            
+            if hpu_c := count_re.match(line):
                 hpu_count = hpu_c.group(1)
 
-            hpu_m = model_re.match(line)
-            if hpu_m:
+            if hpu_m := model_re.match(line):
                 hpu_model = hpu_m.group(1)
 
-            hpu_d = driver_re.match(line)
-            if hpu_d:
+            if hpu_d := driver_re.match(line):
                 hpu_driver = hpu_d.group(1)
 
             if hpu_model and hpu_count and hpu_driver:
