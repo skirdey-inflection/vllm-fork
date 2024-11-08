@@ -433,13 +433,6 @@ class EngineArgs:
                             'Setting this flag to True or False'
                             ' has no effect on vLLM behavior.')
         parser.add_argument(
-            '--use-padding-aware-scheduling',
-            default=EngineArgs.use_padding_aware_scheduling,
-            action='store_true',
-            help=('Use padding-aware scheduling. If True, the scheduler '
-                  'will consider padded tokens in prefill. '
-                  'By default this is set to False. '))
-        parser.add_argument(
             '--num-lookahead-slots',
             type=int,
             default=EngineArgs.num_lookahead_slots,
