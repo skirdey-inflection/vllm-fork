@@ -1,3 +1,4 @@
+import logging
 from functools import partial
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -31,6 +32,8 @@ from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
+
+logger = logging.getLogger(__name__)
 
 
 class InternLM2MLP(nn.Module):
@@ -145,15 +148,74 @@ class InternLM2Attention(nn.Module):
 
     def split_qkv(self, qkv: torch.Tensor):
         seq_len = qkv.shape[0]
+
+        # Log initial qkv tensor properties
+        logger.info(f"Initial qkv.shape: {qkv.shape}")
+        logger.info(f"Initial qkv.stride(): {qkv.stride()}")
+        logger.info(f"Initial qkv.is_contiguous(): {qkv.is_contiguous()}")
+
+
         if self.tp_size > 1:
+            logger.info(f"qkv_map: {qkv_map}")
             qkv_map = [self.q_size, self.kv_size, self.kv_size] * self.tp_size
             qkv = tensor_model_parallel_all_gather(qkv)
+
+                    # Log qkv after all_gather
+            logger.info(f"After all_gather qkv.shape: {qkv.shape}")
+            logger.info(f"After all_gather qkv.stride(): {qkv.stride()}")
+            logger.info(f"After all_gather qkv.is_contiguous(): {qkv.is_contiguous()}")
+
+
             qkv = torch.split(qkv, qkv_map, dim=-1)
+
+                    # Log qkv after split
+            logger.info(f"After split qkv length: {len(qkv)}")
+            for i, tensor in enumerate(qkv):
+                logger.info(f"qkv[{i}].shape: {tensor.shape}")
+
+
             qkv = qkv[::3] + qkv[1::3] + qkv[2::3]
+
+                    # Log qkv after reordering
+            logger.info(f"After reordering qkv length: {len(qkv)}")
+            for i, tensor in enumerate(qkv):
+                logger.info(f"qkv[{i}].shape: {tensor.shape}")
+
+
             qkv = torch.cat(qkv, dim=-1)
+
+                    # Log qkv after concatenation
+            print(f"After cat qkv.shape: {qkv.shape}")
+            print(f"After cat qkv.stride(): {qkv.stride()}")
+            print(f"After cat qkv.is_contiguous(): {qkv.is_contiguous()}")
+        
         qkv = qkv.contiguous()
-        qkv = qkv.view(seq_len, self.total_num_kv_heads,
-                       self.key_value_groups + 2, self.head_dim)
+
+
+        # Log qkv after contiguous
+        logger.info(f"After contiguous qkv.shape: {qkv.shape}")
+        logger.info(f"After contiguous qkv.stride(): {qkv.stride()}")
+        logger.info(f"After contiguous qkv.is_contiguous(): {qkv.is_contiguous()}")
+
+        new_shape = (seq_len, self.total_num_kv_heads, self.key_value_groups + 2, self.head_dim)
+        logger.info(f"Intended new shape for qkv: {new_shape}")
+
+        # Verify that total elements match
+        expected_numel = seq_len * self.total_num_kv_heads * (self.key_value_groups + 2) * self.head_dim
+        actual_numel = qkv.numel()
+        print(f"Expected number of elements: {expected_numel}")
+        print(f"Actual number of elements: {actual_numel}")
+        assert expected_numel == actual_numel, "Mismatch in total number of elements."
+
+        try:
+            qkv = qkv.view(*new_shape)
+        except Exception as e:
+            logger.info(f"Error during view: {e}")
+            # Optionally, try to use reshape
+            logger.info("Attempting to use reshape instead of view.")
+            qkv = qkv.reshape(*new_shape)
+    
+
         q, k, v = torch.split(qkv, [self.key_value_groups, 1, 1], dim=-2)
         q = q.reshape(seq_len, self.q_size * self.tp_size)
         k = k.reshape(seq_len, self.kv_size * self.tp_size)
