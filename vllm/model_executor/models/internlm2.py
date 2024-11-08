@@ -151,7 +151,7 @@ class InternLM2Attention(nn.Module):
             qkv = torch.split(qkv, qkv_map, dim=-1)
             qkv = qkv[::3] + qkv[1::3] + qkv[2::3]
             qkv = torch.cat(qkv, dim=-1)
-
+        qkv = qkv.contiguous()
         qkv = qkv.view(seq_len, self.total_num_kv_heads,
                        self.key_value_groups + 2, self.head_dim)
         q, k, v = torch.split(qkv, [self.key_value_groups, 1, 1], dim=-2)
