@@ -184,38 +184,11 @@ class InternLM2Attention(nn.Module):
 
             qkv = torch.cat(qkv, dim=-1)
 
-                    # Log qkv after concatenation
-            print(f"After cat qkv.shape: {qkv.shape}")
-            print(f"After cat qkv.stride(): {qkv.stride()}")
-            print(f"After cat qkv.is_contiguous(): {qkv.is_contiguous()}")
+    
         
         qkv = qkv.contiguous()
-
-
-        # Log qkv after contiguous
-        logger.info(f"After contiguous qkv.shape: {qkv.shape}")
-        logger.info(f"After contiguous qkv.stride(): {qkv.stride()}")
-        logger.info(f"After contiguous qkv.is_contiguous(): {qkv.is_contiguous()}")
-
-        new_shape = (seq_len, self.total_num_kv_heads, self.key_value_groups + 2, self.head_dim)
-        logger.info(f"Intended new shape for qkv: {new_shape}")
-
-        # Verify that total elements match
-        expected_numel = seq_len * self.total_num_kv_heads * (self.key_value_groups + 2) * self.head_dim
-        actual_numel = qkv.numel()
-        print(f"Expected number of elements: {expected_numel}")
-        print(f"Actual number of elements: {actual_numel}")
-        assert expected_numel == actual_numel, "Mismatch in total number of elements."
-
-        try:
-            qkv = qkv.view(*new_shape)
-        except Exception as e:
-            logger.info(f"Error during view: {e}")
-            # Optionally, try to use reshape
-            logger.info("Attempting to use reshape instead of view.")
-            qkv = qkv.reshape(*new_shape)
-    
-
+        qkv = qkv.view(seq_len, self.total_num_kv_heads,
+                       self.key_value_groups + 2, self.head_dim)
         q, k, v = torch.split(qkv, [self.key_value_groups, 1, 1], dim=-2)
         q = q.reshape(seq_len, self.q_size * self.tp_size)
         k = k.reshape(seq_len, self.kv_size * self.tp_size)
