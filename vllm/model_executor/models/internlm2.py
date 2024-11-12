@@ -144,7 +144,8 @@ class InternLM2Attention(nn.Module):
         )
 
     def split_qkv(self, qkv: torch.Tensor):
-        seq_len = qkv.shape[0]
+        batch_size, seq_len, hidden_size = qkv.shape  # Correctly unpack dimensions
+
         if self.tp_size > 1:
             qkv_map = [self.q_size, self.kv_size, self.kv_size] * self.tp_size
             qkv = tensor_model_parallel_all_gather(qkv)
@@ -152,20 +153,29 @@ class InternLM2Attention(nn.Module):
             qkv = qkv[::3] + qkv[1::3] + qkv[2::3]
             qkv = torch.cat(qkv, dim=-1)
 
-        qkv = qkv.view(seq_len, self.total_num_kv_heads,
-                       self.key_value_groups + 2, self.head_dim)
+        qkv = qkv.contiguous()
+
+        print(qkv.shape)
+        print(qkv.stride())
+        print(qkv.is_contiguous())
+
+        # Reshape using the correct sequence length
+        qkv = qkv.reshape(batch_size, seq_len, self.total_num_kv_heads,
+                        self.key_value_groups + 2, self.head_dim)
         q, k, v = torch.split(qkv, [self.key_value_groups, 1, 1], dim=-2)
-        q = q.reshape(seq_len, self.q_size * self.tp_size)
-        k = k.reshape(seq_len, self.kv_size * self.tp_size)
-        v = v.reshape(seq_len, self.kv_size * self.tp_size)
+        q = q.reshape(batch_size, seq_len, self.q_size * self.tp_size)
+        k = k.reshape(batch_size, seq_len, self.kv_size * self.tp_size)
+        v = v.reshape(batch_size, seq_len, self.kv_size * self.tp_size)
 
         if self.tp_size > 1:
             splitter = partial(split_tensor_along_last_dim,
-                               num_partitions=self.tp_size)
+                            num_partitions=self.tp_size)
             q = splitter(q)[self.tp_rank]
             k = splitter(k)[self.tp_rank]
             v = splitter(v)[self.tp_rank]
         return q, k, v
+
+
 
     def forward(
         self,
