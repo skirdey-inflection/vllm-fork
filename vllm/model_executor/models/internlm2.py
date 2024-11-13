@@ -144,7 +144,7 @@ class InternLM2Attention(nn.Module):
         )
 
     def split_qkv(self, qkv: torch.Tensor):
-        batch_size, seq_len, hidden_size = qkv.shape  # Correctly unpack dimensions
+        batch_size, seq_len, hidden_size = qkv.shape
 
         if self.tp_size > 1:
             qkv_map = [self.q_size, self.kv_size, self.kv_size] * self.tp_size
@@ -154,12 +154,7 @@ class InternLM2Attention(nn.Module):
             qkv = torch.cat(qkv, dim=-1)
 
         qkv = qkv.contiguous()
-
-        print(qkv.shape)
-        print(qkv.stride())
-        print(qkv.is_contiguous())
-
-        # Reshape using the correct sequence length
+   
         qkv = qkv.reshape(batch_size, seq_len, self.total_num_kv_heads,
                         self.key_value_groups + 2, self.head_dim)
         q, k, v = torch.split(qkv, [self.key_value_groups, 1, 1], dim=-2)
