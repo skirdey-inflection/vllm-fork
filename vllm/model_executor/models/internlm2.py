@@ -144,7 +144,7 @@ class InternLM2Attention(nn.Module):
         )
 
     def split_qkv(self, qkv: torch.Tensor):
-        batch_size, seq_len, hidden_size = qkv.shape
+        batch_size, seq_len, _ = qkv.shape
 
         if self.tp_size > 1:
             qkv_map = [self.q_size, self.kv_size, self.kv_size] * self.tp_size
@@ -154,9 +154,9 @@ class InternLM2Attention(nn.Module):
             qkv = torch.cat(qkv, dim=-1)
 
         qkv = qkv.contiguous()
-   
+
         qkv = qkv.reshape(batch_size, seq_len, self.total_num_kv_heads,
-                        self.key_value_groups + 2, self.head_dim)
+                          self.key_value_groups + 2, self.head_dim)
         q, k, v = torch.split(qkv, [self.key_value_groups, 1, 1], dim=-2)
         q = q.reshape(batch_size, seq_len, self.q_size * self.tp_size)
         k = k.reshape(batch_size, seq_len, self.kv_size * self.tp_size)
@@ -164,13 +164,11 @@ class InternLM2Attention(nn.Module):
 
         if self.tp_size > 1:
             splitter = partial(split_tensor_along_last_dim,
-                            num_partitions=self.tp_size)
+                               num_partitions=self.tp_size)
             q = splitter(q)[self.tp_rank]
             k = splitter(k)[self.tp_rank]
             v = splitter(v)[self.tp_rank]
         return q, k, v
-
-
 
     def forward(
         self,
