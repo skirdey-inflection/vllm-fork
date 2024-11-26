@@ -145,7 +145,7 @@ class InternLM2Attention(nn.Module):
 
     def split_qkv(self, qkv: torch.Tensor):
         # Unpack all dimensions except the last one
-        *batch_dims, last_dim = qkv.shape
+        *batch_dims, _ = qkv.shape
 
         if self.tp_size > 1:
             qkv_map = [self.q_size, self.kv_size, self.kv_size] * self.tp_size
@@ -170,7 +170,7 @@ class InternLM2Attention(nn.Module):
             q = splitter(q)[self.tp_rank]
             k = splitter(k)[self.tp_rank]
             v = splitter(v)[self.tp_rank]
-        
+
         return q, k, v
 
     def forward(
